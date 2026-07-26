@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cmrelayinfo"
+version = "0.1.0"
+readme = "README.md"
+description = "report chatmail relay capabilities (iroh relay, TURN, maxsmtprecipients, quota)"
+requires-python = ">=3.10"
+dependencies = [
+  "deltachat-rpc-server>=2.24.0",
+  "deltachat-rpc-client>=2.24.0",
+  "xdg-base-dirs>=6.0.2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+  "ruff",
+  "execnet",  # needed by the deltachat_rpc_client pytest plugin
+]
+
+[tool.setuptools]
+py-modules = ["cmrelayinfo"]
+
+[project.urls]
+Repository = "https://github.com/hpk42/cmrelayinfo"
+
+[project.scripts]
+cmrelayinfo = "cmrelayinfo:main"
+
+[tool.pytest.ini_options]
+addopts = "-v -ra --strict-markers"
+markers = [
+  "online: tests that need network access to real relays (deselected by default)",
+]
+
+[tool.ruff]
+lint.select = [
+  "F", # Pyflakes
+  "E", # pycodestyle errors
+  "W", # pycodestyle warnings
+]
+line-length = 100

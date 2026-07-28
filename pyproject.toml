@@ -1,24 +1,26 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=68", "setuptools-git-versioning >=2.0,<3"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "cmrelayinfo"
-version = "0.1.0"
 readme = "README.md"
 description = "report chatmail relay capabilities (iroh relay, TURN, maxsmtprecipients, quota)"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
   "deltachat-rpc-server>=2.24.0",
   "deltachat-rpc-client>=2.24.0",
   "xdg-base-dirs>=6.0.2",
 ]
 
-[project.optional-dependencies]
-dev = [
+dynamic = ["version"]
+
+[tool.setuptools-git-versioning]
+enabled = true
+
+[dependency-groups]
+test = [
   "pytest",
-  "ruff",
-  "execnet",  # needed by the deltachat_rpc_client pytest plugin
 ]
 
 [tool.setuptools]
@@ -26,12 +28,15 @@ py-modules = ["cmrelayinfo"]
 
 [project.urls]
 Repository = "https://github.com/hpk42/cmrelayinfo"
+Changelog = "https://github.com/hpk42/cmrelayinfo/blob/main/CHANGELOG.md"
 
 [project.scripts]
 cmrelayinfo = "cmrelayinfo:main"
 
 [tool.pytest.ini_options]
-addopts = "-v -ra --strict-markers"
+# The deltachat_rpc_client pytest plugin is not used and would need
+# extra dependencies (execnet) to even load.
+addopts = "-v -ra --strict-markers -m 'not online' -p no:deltachat_rpc_client.pytestplugin"
 markers = [
   "online: tests that need network access to real relays (deselected by default)",
 ]
@@ -39,7 +44,12 @@ markers = [
 [tool.ruff]
 lint.select = [
   "F", # Pyflakes
-  "E", # pycodestyle errors
-  "W", # pycodestyle warnings
+  "I", # isort
+
+  "PLC", # Pylint Convention
+  "PLE", # Pylint Error
+  "PLW", # Pylint Warning
 ]
-line-length = 100
+lint.ignore = [
+  "PLC0415" # import-outside-top-level
+]

@@ -36,11 +36,16 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from importlib.metadata import PackageNotFoundError, version
 
 from deltachat_rpc_client import DeltaChat, Rpc
 from xdg_base_dirs import xdg_cache_home
 
-__version__ = "0.1.0"
+try:
+    # the version comes from the git tag the release was built from
+    __version__ = version("cmrelayinfo")
+except PackageNotFoundError:  # running from a source checkout
+    __version__ = "0.0.0"
 
 RELAYS_URL = "https://chatmail.at/relays"
 RELAY_LIST_TTL = 24 * 3600  # seconds
@@ -133,7 +138,8 @@ def parse_relay_list(html_text):
     LinkParser().feed(html_text)
 
     domains = []
-    for href, text in links:
+    for raw_href, raw_text in links:
+        href, text = raw_href, raw_text
         if href.startswith("dcaccount:"):
             # account creation links like dcaccount:https://relay.example/new
             href = href[len("dcaccount:") :]
@@ -553,7 +559,7 @@ def format_error(exc):
     lines = [ln.strip() for ln in message.splitlines()]
     lines = [ln for ln in lines if ln and ln != "Error:"]
     message = lines[0] if lines else exc.__class__.__name__
-    message = message.strip("“”\"")
+    message = message.strip('“”"')
     if len(message) > 60:
         message = message[:57] + "..."
     return message
@@ -619,7 +625,9 @@ def query_relay(relay, timeout, verbose=0, via=None):
             result.iroh_ok, result.iroh_error = check_iroh_relay(result.iroh_relay)
         if result.turn:
             if verbose:
-                log(f"# {relay}: stun probing {result.turn['host']}:{result.turn['port']}")
+                log(
+                    f"# {relay}: stun probing {result.turn['host']}:{result.turn['port']}"
+                )
             result.turn_ok, result.turn_error = check_turn(
                 result.turn["host"], result.turn["port"]
             )
@@ -800,7 +808,9 @@ def main(argv=None):
     for host, error in failed_hubs:
         all_ok = False
         result = RelayResult(relay=host, error=error)
-        line = format_json_line(result) if args.json else format_table_row(result, widths)
+        line = (
+            format_json_line(result) if args.json else format_table_row(result, widths)
+        )
         print(line, flush=True)
     created = reused = 0
     with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:

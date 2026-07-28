@@ -18,10 +18,33 @@ cmrelayinfo 116.203.128.59      # relay given as IP address
 cmrelayinfo --json --refresh    # jsonlines output, refetch relay list
 ```
 
+Installation
+------------
+
+```
+uv tool install cmrelayinfo
+```
+
 Development
 -----------
 
 ```
-uv venv && uv pip install -e ".[dev]"
+uv venv && uv pip install -e . --group test
 uv run pytest
 ```
+
+CI checks come from the shared
+[chatmail/workflows](https://github.com/chatmail/workflows)
+repository; run them locally with `uvx ruff check .` and
+`uvx ruff format --check .`
+
+To release, run the shared release script from a checkout of
+chatmail/workflows:
+
+```
+python ../workflows/scripts/make_new_release.py
+```
+
+It runs the checks, tests the built wheel, writes the CHANGELOG.md
+entry with git-cliff, then tags and pushes. The release.yml workflow
+publishes to PyPI via trusted publishing (OIDC).

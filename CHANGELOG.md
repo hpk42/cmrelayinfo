@@ -1,6 +1,4 @@
-# Changelog
-
-## 0.1.0 (unreleased)
+## unreleased
 
 - initial implementation: scrape and cache the relay list from
   https://chatmail.at/relays, cache one chat profile per relay,

@@ -391,12 +391,9 @@ def fetch_imap_info(host, port, user, password, timeout, verbose=0):
         tag = conn._new_tag()
         keys = " ".join(METADATA_KEYS)
         conn.send(tag + f' GETMETADATA "" ({keys})'.encode("ascii") + b"\r\n")
-        status_line, tokens = read_metadata_response(conn.readline, conn.read, tag)
+        # The tagged status is ignored on purpose, mirroring core/async-imap.
+        _status_line, tokens = read_metadata_response(conn.readline, conn.read, tag)
         metadata = parse_metadata_tokens(tokens)
-        if " OK " not in status_line and not status_line.endswith("OK"):
-            if verbose:
-                log(f"# GETMETADATA failed: {status_line}")
-            metadata = {}
 
         quota = None
         with contextlib.suppress(Exception):

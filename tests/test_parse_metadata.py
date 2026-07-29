@@ -77,6 +77,16 @@ def test_multiline_literal_with_crlf_inside():
     assert meta["/shared/comment"] == "line one\r\nline two"
 
 
+def test_entries_kept_when_server_answers_no():
+    wire = (
+        b'* METADATA "" (/shared/vendor/deltachat/irohrelay {22}\r\n'
+        b"https://chat.nuvon.app)\r\n"
+        b"ABC1 NO [SERVERBUG] Internal error occurred\r\n"
+    )
+    status, meta = run_parse(wire)
+    assert meta["/shared/vendor/deltachat/irohrelay"] == "https://chat.nuvon.app"
+
+
 def test_parse_turn_value():
     turn = parse_turn_value("nine.testrun.org:3478:1758650868:secretpass1")
     assert turn == {"host": "nine.testrun.org", "port": 3478, "expiry": 1758650868}

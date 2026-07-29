@@ -1,4 +1,10 @@
 
+## [0.1.1] - 2026-07-29
+
+### Fixes
+
+- when querying metadata behave more like core/async-imap.
+
 ## [0.1.0] - 2026-07-28
 
 - initial implementation: scrape and cache the relay list from

@@ -1,17 +1,12 @@
 """
 cmrelayinfo: report chatmail relay capabilities.
 
-For each relay, cmrelayinfo logs in with a cached chat profile
-(created once per relay, then reused) and reports what the relay
-advertises to clients:
-
-- iroh relay URL (webxdc realtime channels), IMAP METADATA
-- TURN server (calls), IMAP METADATA
-- maxsmtprecipients, IMAP METADATA
-- storage quota (GETQUOTAROOT)
-
-The relay list comes from scraping https://chatmail.at/relays (cached),
-or from relay domains (or IP addresses) given on the command line.
+For each relay, log in with a cached chat profile (created once,
+then reused) and report what the relay advertises to clients:
+iroh relay URL, TURN server and maxsmtprecipients (IMAP METADATA),
+storage quota (GETQUOTAROOT) and max message size (ESMTP SIZE).
+The relay list comes from scraping https://chatmail.at/relays
+(cached), or from domains/IPs given on the command line.
 """
 
 import argparse
@@ -36,6 +31,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 from importlib.metadata import PackageNotFoundError, version
 
 from deltachat_rpc_client import DeltaChat, Rpc
@@ -63,7 +59,8 @@ NOTEXISTS = "NOTEXISTS"
 # seconds for probing iroh relay and TURN reachability
 SERVICE_TIMEOUT = 8
 
-# domains on the relay list page that are not relays themselves
+# domains on the relay list page that are not relays themselves;
+# chat.sus.fr is a link hub pointing to further relays, see HUB_URLS
 NON_RELAY_HOSTS = {
     "chatmail.at",
     "www.chatmail.at",
@@ -71,8 +68,6 @@ NON_RELAY_HOSTS = {
     "support.delta.chat",
     "github.com",
     "codeberg.org",
-    # chat.sus.fr is a link hub pointing to further chatmail relays,
-    # not a relay itself; it is followed separately, see HUB_URLS
     "chat.sus.fr",
 }
 
@@ -86,9 +81,7 @@ def log(msg):
     print(msg, file=sys.stderr, flush=True)
 
 
-# ---------------------------------------------------------------------------
-# relay list scraping and caching
-# ---------------------------------------------------------------------------
+# --- relay list scraping and caching
 
 
 def get_cache_dir():
@@ -106,44 +99,40 @@ def fetch_url(url, timeout=30):
         return resp.read().decode("utf-8", "replace")
 
 
-def parse_relay_list(html_text):
-    """Extract relay domains from the chatmail.at/relays page.
+class _LinkParser(HTMLParser):
+    """Collect (href, link text) pairs of all links in a page."""
 
-    Relay entries link their own domain and use the domain as link text.
-    """
-    from html.parser import HTMLParser
+    def __init__(self):
+        super().__init__()
+        self.links = []
+        self._href = None
+        self._text = []
 
-    links = []
-
-    class LinkParser(HTMLParser):
-        def __init__(self):
-            super().__init__()
-            self._href = None
+    def handle_starttag(self, tag, attrs):
+        if tag == "a":
+            self._href = dict(attrs).get("href")
             self._text = []
 
-        def handle_starttag(self, tag, attrs):
-            if tag == "a":
-                self._href = dict(attrs).get("href")
-                self._text = []
+    def handle_data(self, data):
+        if self._href is not None:
+            self._text.append(data)
 
-        def handle_data(self, data):
-            if self._href is not None:
-                self._text.append(data)
+    def handle_endtag(self, tag):
+        if tag == "a" and self._href is not None:
+            self.links.append((self._href, "".join(self._text).strip()))
+            self._href = None
 
-        def handle_endtag(self, tag):
-            if tag == "a" and self._href is not None:
-                links.append((self._href, "".join(self._text).strip()))
-                self._href = None
 
-    LinkParser().feed(html_text)
-
+def parse_relay_list(html_text):
+    """Extract relay domains: links using their own domain as link
+    text, plus dcaccount: account creation links."""
+    parser = _LinkParser()
+    parser.feed(html_text)
     domains = []
-    for raw_href, raw_text in links:
+    for raw_href, raw_text in parser.links:
         href, text = raw_href, raw_text
         if href.startswith("dcaccount:"):
-            # account creation links like dcaccount:https://relay.example/new
-            href = href[len("dcaccount:") :]
-            text = None
+            href, text = href.removeprefix("dcaccount:"), None
         try:
             url = urllib.parse.urlparse(href)
         except ValueError:
@@ -153,9 +142,8 @@ def parse_relay_list(html_text):
             continue
         if text is not None and host != text.lower():
             continue
-        if host in NON_RELAY_HOSTS or host in domains:
-            continue
-        domains.append(host)
+        if host not in NON_RELAY_HOSTS and host not in domains:
+            domains.append(host)
     return domains
 
 
@@ -209,12 +197,8 @@ def get_relay_list(refresh=False, verbose=0):
 
 
 def expand_relay_args(relay_args, verbose=0):
-    """Expand explicitly given relays, resolving known hub hosts.
-
-    A hub host like chat.sus.fr is not a relay itself; it is fetched
-    and replaced by the relays it links. Returns (relays, via, failed)
-    where failed is a list of (hub_host, error) pairs.
-    """
+    """Expand explicitly given relays, replacing known hub hosts by the
+    relays they link. Returns (relays, via, failed_hub_pairs)."""
     hub_hosts = {urllib.parse.urlparse(u).netloc for u in HUB_URLS}
     relays, via, failed = [], {}, []
     for arg in relay_args:
@@ -239,9 +223,7 @@ def expand_relay_args(relay_args, verbose=0):
     return relays, via, failed
 
 
-# ---------------------------------------------------------------------------
-# account setup (one cached profile per relay, cmping style)
-# ---------------------------------------------------------------------------
+# --- account setup (one cached profile per relay, cmping style)
 
 
 def is_ip_address(host):
@@ -257,11 +239,10 @@ def create_qr_url(domain_or_ip):
     if is_ip_address(domain_or_ip):
         chars = string.ascii_lowercase + string.digits
         username = "".join(random.choices(chars, k=12))
-        password = "".join(random.choices(chars, k=20))
-        encoded_password = urllib.parse.quote(password, safe="")
+        password = urllib.parse.quote("".join(random.choices(chars, k=20)), safe="")
         return (
             f"dclogin:{username}@{domain_or_ip}/?"
-            f"p={encoded_password}&v=1&ip=993&sp=465&ic=3&ss=default"
+            f"p={password}&v=1&ip=993&sp=465&ic=3&ss=default"
         )
     return f"dcaccount:{domain_or_ip}"
 
@@ -270,24 +251,18 @@ def get_relay_account(dc, relay, verbose=0):
     """Return (account, created) for the relay, reusing cached profiles."""
     accounts = dc.get_all_accounts()
     for account in accounts:
-        addr = account.get_config("configured_addr")
-        if addr and "@" in addr and addr.split("@")[1] == relay:
+        addr = account.get_config("configured_addr") or ""
+        if addr.endswith(f"@{relay}"):
             if verbose:
                 log(f"# {relay}: reusing cached profile {addr}")
             return account, False
-
-    # Reuse a leftover unconfigured account before creating a new one.
-    # Note that retrying credentials from a previously failed setup is
-    # not possible: core only persists the transport after a successful
-    # configuration, so a failed relay costs one fresh registration per
-    # run for as long as it stays broken.
-    account = None
-    for candidate in accounts:
-        if not candidate.get_config("configured_addr"):
-            account = candidate
-            break
-    if account is None:
-        account = dc.add_account()
+    # reuse a leftover unconfigured account before creating a new one;
+    # retrying credentials from a failed setup is impossible as core
+    # only persists the transport after a successful configuration
+    account = (
+        next((a for a in accounts if not a.get_config("configured_addr")), None)
+        or dc.add_account()
+    )
     if verbose:
         log(f"# {relay}: creating new profile")
     account.set_config_from_qr(create_qr_url(relay))
@@ -297,50 +272,27 @@ def get_relay_account(dc, relay, verbose=0):
     return account, True
 
 
-# ---------------------------------------------------------------------------
-# IMAP METADATA and QUOTA
-# ---------------------------------------------------------------------------
+# --- IMAP METADATA and QUOTA
+
+_TOKEN_RE = re.compile(rb'"((?:\\.|[^"\\])*)"|([^ ()"\r\n]+)')
 
 
 def _tokenize(segment):
-    """Tokenize a piece of an IMAP response line.
-
-    Yields ("atom", s), ("quoted", s) and ignores parentheses.
-    Literal markers {n} at line ends are handled by the caller.
-    """
+    """Return ("atom", s) / ("quoted", s) tokens, ignoring parentheses.
+    Literal markers {n} at line ends are handled by the caller."""
     tokens = []
-    i = 0
-    n = len(segment)
-    while i < n:
-        c = segment[i : i + 1]
-        if c in b" \r\n":
-            i += 1
-        elif c in b"()":
-            i += 1
-        elif c == b'"':
-            i += 1
-            out = bytearray()
-            while i < n and segment[i : i + 1] != b'"':
-                if segment[i : i + 1] == b"\\" and i + 1 < n:
-                    i += 1
-                out += segment[i : i + 1]
-                i += 1
-            i += 1
-            tokens.append(("quoted", out.decode("utf-8", "replace")))
+    for m in _TOKEN_RE.finditer(segment):
+        if m[2] is not None:
+            tokens.append(("atom", m[2].decode("utf-8", "replace")))
         else:
-            j = i
-            while j < n and segment[j : j + 1] not in b' ()"\r\n':
-                j += 1
-            tokens.append(("atom", segment[i:j].decode("utf-8", "replace")))
-            i = j
+            unescaped = re.sub(rb"\\(.)", rb"\1", m[1])
+            tokens.append(("quoted", unescaped.decode("utf-8", "replace")))
     return tokens
 
 
 def read_metadata_response(readline, read, tag):
     """Read raw IMAP lines until the tagged completion, handling literals.
-
-    Returns (status_line, tokens).
-    """
+    Returns (status_line, tokens)."""
     tokens = []
     while True:
         line = readline()
@@ -353,8 +305,7 @@ def read_metadata_response(readline, read, tag):
             if not m:
                 break
             tokens.extend(_tokenize(line[: m.start()]))
-            literal = read(int(m.group(1)))
-            tokens.append(("literal", literal.decode("utf-8", "replace")))
+            tokens.append(("literal", read(int(m.group(1))).decode("utf-8", "replace")))
             line = readline()
         tokens.extend(_tokenize(line))
 
@@ -363,21 +314,16 @@ def parse_metadata_tokens(tokens):
     """Pair up /key value tokens from a METADATA response token stream."""
     result = {}
     i = 0
-    while i < len(tokens):
-        kind, value = tokens[i]
-        if kind == "atom" and value.startswith("/"):
-            if i + 1 < len(tokens):
-                vkind, vvalue = tokens[i + 1]
-                if vkind == "atom" and vvalue.startswith("/"):
-                    i += 1
-                    continue
-                if vkind == "atom" and vvalue == "NIL":
-                    result[value] = None
-                else:
-                    result[value] = vvalue
-                i += 2
-                continue
-        i += 1
+    while i + 1 < len(tokens):
+        kind, key = tokens[i]
+        vkind, value = tokens[i + 1]
+        if kind != "atom" or not key.startswith("/"):
+            i += 1
+        elif vkind == "atom" and value.startswith("/"):
+            i += 1
+        else:
+            result[key] = None if (vkind, value) == ("atom", "NIL") else value
+            i += 2
     return result
 
 
@@ -391,22 +337,17 @@ def fetch_imap_info(host, port, user, password, timeout, verbose=0):
         tag = conn._new_tag()
         keys = " ".join(METADATA_KEYS)
         conn.send(tag + f' GETMETADATA "" ({keys})'.encode("ascii") + b"\r\n")
-        # The tagged status is ignored on purpose, mirroring core/async-imap.
+        # the tagged status is ignored on purpose, mirroring core/async-imap
         _status_line, tokens = read_metadata_response(conn.readline, conn.read, tag)
         metadata = parse_metadata_tokens(tokens)
 
         quota = None
         with contextlib.suppress(Exception):
             typ, data = conn.getquotaroot("INBOX")
-            if typ == "OK":
-                for item in data[1] or []:
-                    if isinstance(item, bytes):
-                        m = re.search(rb"STORAGE (\d+) (\d+)", item)
-                        if m:
-                            quota = {
-                                "storage_used_kb": int(m.group(1)),
-                                "storage_limit_kb": int(m.group(2)),
-                            }
+            blob = b" ".join(x for x in (data[1] or []) if isinstance(x, bytes))
+            m = re.search(rb"STORAGE (\d+) (\d+)", blob) if typ == "OK" else None
+            if m:
+                quota = {"storage_used_kb": int(m[1]), "storage_limit_kb": int(m[2])}
         with contextlib.suppress(Exception):
             conn.logout()
         return metadata, quota
@@ -416,61 +357,49 @@ def fetch_imap_info(host, port, user, password, timeout, verbose=0):
         raise
 
 
-# ---------------------------------------------------------------------------
-# service reachability checks
-# ---------------------------------------------------------------------------
+# --- service reachability checks
 
 
 def short_neterr(e):
-    """Map network exceptions to a compact reason string."""
-    if isinstance(e, (socket.timeout, TimeoutError)):
-        return "timeout"
-    if isinstance(e, socket.gaierror):
-        return "dns"
-    if isinstance(e, ConnectionRefusedError):
-        return "refused"
-    if isinstance(e, ssl.SSLError):
-        return "tls"
+    """Map a network exception to a compact reason string."""
     if isinstance(e, urllib.error.URLError) and isinstance(e.reason, Exception):
         return short_neterr(e.reason)
-    text = str(e) or e.__class__.__name__
-    return text[:16]
+    for types, short in (
+        ((socket.timeout, TimeoutError), "timeout"),
+        (socket.gaierror, "dns"),
+        (ConnectionRefusedError, "refused"),
+        (ssl.SSLError, "tls"),
+    ):
+        if isinstance(e, types):
+            return short
+    return (str(e) or e.__class__.__name__)[:16]
 
 
 def check_iroh_relay(url, timeout=SERVICE_TIMEOUT):
-    """Probe the iroh relay behind the advertised URL.
-
-    cmdeploy proxies /relay/probe and /generate_204 to iroh-relay.
-    Returns (ok, short_error_or_None).
-    """
-    last_error = "unreachable"
-    for path in ("/relay/probe", "/generate_204"):
-        try:
-            req = urllib.request.Request(
-                url.rstrip("/") + path,
-                headers={"User-Agent": f"cmrelayinfo/{__version__}"},
-            )
-            with urllib.request.urlopen(req, timeout=timeout):
-                return True, None
-        except urllib.error.HTTPError as e:
-            last_error = f"http {e.code}"
-        except Exception as e:
-            return False, short_neterr(e)
-    return False, last_error
+    """Probe the advertised iroh relay via /generate_204, which core
+    probes and which both iroh-relay 0.35 and the 1.0 line serve."""
+    try:
+        req = urllib.request.Request(
+            url.rstrip("/") + "/generate_204",
+            headers={"User-Agent": f"cmrelayinfo/{__version__}"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout):
+            return True, None
+    except urllib.error.HTTPError as e:
+        return False, f"http {e.code}"
+    except Exception as e:
+        return False, short_neterr(e)
 
 
 def check_turn(host, port, timeout=SERVICE_TIMEOUT, tries=2):
-    """Send a STUN binding request (RFC 5389) to the TURN server via UDP.
-
-    Returns (ok, short_error_or_None).
-    """
+    """Send a STUN binding request (RFC 5389) to the TURN server via UDP."""
     transaction_id = random.randbytes(12)
     request = struct.pack("!HHI", 0x0001, 0, 0x2112A442) + transaction_id
     try:
         family, socktype, proto, _, addr = socket.getaddrinfo(
             host, port, type=socket.SOCK_DGRAM
         )[0]
-        for attempt in range(tries):
+        for _attempt in range(tries):
             with socket.socket(family, socktype, proto) as sock:
                 sock.settimeout(timeout / tries)
                 sock.sendto(request, addr)
@@ -478,11 +407,7 @@ def check_turn(host, port, timeout=SERVICE_TIMEOUT, tries=2):
                     data, _ = sock.recvfrom(2048)
                 except (socket.timeout, TimeoutError):
                     continue
-            if (
-                len(data) >= 20
-                and data[0:2] == b"\x01\x01"
-                and data[8:20] == transaction_id
-            ):
+            if data[0:2] == b"\x01\x01" and data[8:20] == transaction_id:
                 return True, None
             return False, "bad stun reply"
         return False, "timeout"
@@ -491,26 +416,18 @@ def check_turn(host, port, timeout=SERVICE_TIMEOUT, tries=2):
 
 
 def fetch_smtp_max_size(host, port=465, timeout=SERVICE_TIMEOUT):
-    """Read the SIZE capability from the SMTP EHLO response.
-
-    The max message size is not in IMAP METADATA; relays advertise it
-    as postfix message_size_limit via the standard ESMTP SIZE extension.
-    Returns (size_in_bytes_or_None, short_error_or_None).
-    """
+    """Read the max message size from the ESMTP SIZE extension; it is
+    not in IMAP METADATA but advertised as postfix message_size_limit."""
     try:
         with smtplib.SMTP_SSL(host, port, timeout=timeout) as smtp:
             smtp.ehlo()
             size = smtp.esmtp_features.get("size")
-        if size:
-            return int(size), None
-        return None, None
+        return (int(size), None) if size else (None, None)
     except Exception as e:
         return None, short_neterr(e)
 
 
-# ---------------------------------------------------------------------------
-# per relay query
-# ---------------------------------------------------------------------------
+# --- per relay query
 
 
 @dataclass
@@ -544,7 +461,6 @@ def format_error(exc):
         message = exc.args[0].get("message")
     if message is None:
         message = str(exc)
-    # well-known failures are not worth showing in detail
     for pattern, short in (
         ("RPC server failed to start", "can not connect"),
         ("RPC server closed", "can not connect"),
@@ -555,11 +471,8 @@ def format_error(exc):
     # rpc errors often start with "Error:" and blank lines
     lines = [ln.strip() for ln in message.splitlines()]
     lines = [ln for ln in lines if ln and ln != "Error:"]
-    message = lines[0] if lines else exc.__class__.__name__
-    message = message.strip('“”"')
-    if len(message) > 60:
-        message = message[:57] + "..."
-    return message
+    message = (lines[0] if lines else exc.__class__.__name__).strip('“”"')
+    return message if len(message) <= 60 else message[:57] + "..."
 
 
 def parse_turn_value(value):
@@ -567,10 +480,12 @@ def parse_turn_value(value):
     parts = value.split(":")
     if len(parts) < 4:
         return None
-    host = ":".join(parts[:-3])
-    port, ts = parts[-3], parts[-2]
     try:
-        return {"host": host, "port": int(port), "expiry": int(ts)}
+        return {
+            "host": ":".join(parts[:-3]),
+            "port": int(parts[-3]),
+            "expiry": int(parts[-2]),
+        }
     except ValueError:
         return None
 
@@ -607,11 +522,11 @@ def query_relay(relay, timeout, verbose=0, via=None):
         )
 
         iroh = metadata.get("/shared/vendor/deltachat/irohrelay")
-        result.iroh_relay = iroh if iroh else NOTEXISTS
+        result.iroh_relay = iroh or NOTEXISTS
         turn_raw = metadata.get("/shared/vendor/deltachat/turn")
         result.turn = parse_turn_value(turn_raw) if turn_raw else None
         maxrcpt = metadata.get("/shared/vendor/deltachat/maxsmtprecipients")
-        result.maxsmtprecipients = maxrcpt if maxrcpt else NOTEXISTS
+        result.maxsmtprecipients = maxrcpt or NOTEXISTS
         result.comment = metadata.get("/shared/comment")
         result.admin = metadata.get("/shared/admin")
         result.quota = quota
@@ -639,75 +554,49 @@ def query_relay(relay, timeout, verbose=0, via=None):
     return result
 
 
-# ---------------------------------------------------------------------------
-# output
-# ---------------------------------------------------------------------------
+# --- output
 
 
 def clip(text, limit):
-    if len(text) <= limit:
-        return text
-    return text[: limit - 2] + ".."
+    return text if len(text) <= limit else text[: limit - 2] + ".."
 
 
 def format_service(exists, ok, error):
     """Compact cell: YES, NOTEXISTS, or a short ERROR."""
     if not exists:
         return NOTEXISTS
-    if ok:
-        return "YES"
-    return f"ERROR: {clip(error or 'unreachable', 8)}"
+    return "YES" if ok else f"ERROR: {clip(error or 'unreachable', 8)}"
 
 
 def format_admin(admin):
-    if not admin:
-        return NOTEXISTS
-    return clip(admin.removeprefix("mailto:"), ADMIN_WIDTH)
+    return clip(admin.removeprefix("mailto:"), ADMIN_WIDTH) if admin else NOTEXISTS
 
 
 def format_max_message(size, error):
     if size:
         return f"{size / (1024 * 1024):.0f}MB"
-    if error:
-        return f"ERROR: {clip(error, 8)}"
-    return NOTEXISTS
+    return f"ERROR: {clip(error, 8)}" if error else NOTEXISTS
 
 
 def format_quota(quota):
-    """Show only the storage limit; the probe accounts are always empty,
-    so displaying usage would be noise. Usage stays in the JSON output."""
-    if not quota:
-        return NOTEXISTS
-    return f"{quota['storage_limit_kb'] / 1024:.0f}MB"
+    # only the limit; the probe accounts are always empty, so showing
+    # usage would be noise (it stays in the JSON output)
+    return f"{quota['storage_limit_kb'] / 1024:.0f}MB" if quota else NOTEXISTS
 
 
-TABLE_HEADER = [
-    "RELAY",
-    "IROH",
-    "TURN",
-    "MAXRCPT",
-    "MAXMSG",
-    "QUOTA",
-    "ADMIN",
-]
+TABLE_HEADER = ["RELAY", "IROH", "TURN", "MAXRCPT", "MAXMSG", "QUOTA", "ADMIN"]
 
 ADMIN_WIDTH = 26
 
 
-def table_widths(relays):
+def table_widths(labels):
     """Column widths precomputed upfront, so rows can stream out
     as soon as each result is in, without collecting them first."""
-    longest_relay = max((len(r) for r in relays), default=0)
-    service_width = max(len(NOTEXISTS), len("ERROR: ") + 8)
-    return [
-        max(len(TABLE_HEADER[0]), longest_relay),
-        max(len(TABLE_HEADER[1]), service_width),
-        max(len(TABLE_HEADER[2]), service_width),
-        max(len(TABLE_HEADER[3]), len(NOTEXISTS)),
-        max(len(TABLE_HEADER[4]), len(NOTEXISTS)),
-        max(len(TABLE_HEADER[5]), len(NOTEXISTS)),
-        max(len(TABLE_HEADER[6]), ADMIN_WIDTH),
-    ]
+    service = max(len(NOTEXISTS), len("ERROR: ") + 8)
+    longest = max((len(x) for x in labels), default=0)
+    ne = len(NOTEXISTS)
+    mins = [longest, service, service, ne, ne, ne, ADMIN_WIDTH]
+    return [max(len(h), w) for h, w in zip(TABLE_HEADER, mins)]
 
 
 def format_table_row(r, widths):
@@ -754,9 +643,7 @@ def format_json_line(r):
     return json.dumps(obj)
 
 
-# ---------------------------------------------------------------------------
-# main
-# ---------------------------------------------------------------------------
+# --- main
 
 
 def main(argv=None):
@@ -795,27 +682,26 @@ def main(argv=None):
     labels = [relay_label(r, via.get(r)) for r in relays]
     labels += [host for host, _ in failed_hubs]
     widths = table_widths(labels)
-    if not args.json:
-        header = "  ".join(
-            h.ljust(widths[i]) for i, h in enumerate(TABLE_HEADER)
-        ).rstrip()
-        print(header, flush=True)
 
-    all_ok = True
-    for host, error in failed_hubs:
-        all_ok = False
-        result = RelayResult(relay=host, error=error)
+    def emit(result):
         line = (
             format_json_line(result) if args.json else format_table_row(result, widths)
         )
         print(line, flush=True)
+
+    if not args.json:
+        header = "  ".join(h.ljust(widths[i]) for i, h in enumerate(TABLE_HEADER))
+        print(header.rstrip(), flush=True)
+
+    all_ok = True
+    for host, error in failed_hubs:
+        all_ok = False
+        emit(RelayResult(relay=host, error=error))
     created = reused = 0
     with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
         futures = {
-            pool.submit(
-                query_relay, relay, args.timeout, args.verbose, via.get(relay)
-            ): relay
-            for relay in relays
+            pool.submit(query_relay, r, args.timeout, args.verbose, via.get(r)): r
+            for r in relays
         }
         for future in as_completed(futures):
             relay = futures[future]
@@ -826,16 +712,9 @@ def main(argv=None):
                     relay=relay, via=via.get(relay), error=format_error(e)
                 )
             all_ok = all_ok and result.ok
-            if result.profile_created is True:
-                created += 1
-            elif result.profile_created is False:
-                reused += 1
-            line = (
-                format_json_line(result)
-                if args.json
-                else format_table_row(result, widths)
-            )
-            print(line, flush=True)
+            created += result.profile_created is True
+            reused += result.profile_created is False
+            emit(result)
 
     log(f"# profiles: {created} created, {reused} reused from cache")
     sys.stdout.flush()

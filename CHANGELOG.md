@@ -1,4 +1,13 @@
 
+## [0.2.0] - 2026-08-26
+
+### Features / Changes
+
+- parallelize queries and timeout everything after 30 seconds by default.
+
+- various simplifications in the code and comments.
+
+
 ## [0.1.1] - 2026-07-29
 
 ### Fixes

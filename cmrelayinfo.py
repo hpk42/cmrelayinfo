@@ -611,18 +611,21 @@ def format_error(exc):
 
 
 def parse_turn_value(value):
-    """Parse 'host:port:timestamp:password', never returning the password."""
-    parts = value.split(":")
-    if len(parts) < 4:
+    """Parse 'host:port:timestamp:password', never returning the password.
+    Split off only the leading three fields, as core does, so a password
+    carrying colons of its own stays in the part we drop."""
+    parts = value.split(":", 3)
+    if len(parts) != 4:
         return None
+    host, port, expiry, _password = parts
     try:
-        return {
-            "host": ":".join(parts[:-3]),
-            "port": int(parts[-3]),
-            "expiry": int(parts[-2]),
-        }
+        port, expiry = int(port), int(expiry)
     except ValueError:
         return None
+    # core parses the port as u16 and gets no TURN server if it overflows
+    if not 0 <= port <= 65535:
+        return None
+    return {"host": host, "port": port, "expiry": expiry}
 
 
 def relay_label(relay, via):

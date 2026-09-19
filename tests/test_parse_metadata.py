@@ -94,6 +94,23 @@ def test_parse_turn_value():
     assert parse_turn_value("garbage") is None
 
 
+def test_parse_turn_value_password_with_colons():
+    # some relays hand out a realm-prefixed password, which core keeps
+    # whole because it splits off only the first three fields
+    turn = parse_turn_value("relay.example:3478:1790235107:chatmail:secretpass2=")
+    assert turn == {"host": "relay.example", "port": 3478, "expiry": 1790235107}
+    assert "secretpass2" not in str(turn)
+
+
+def test_parse_turn_value_rejects_what_core_rejects():
+    # core parses the port with u16::from_str and the expiry with
+    # i64::from_str, so neither a port out of range nor a
+    # non-numeric expiry yields a TURN server
+    assert parse_turn_value("host:99999:1758650868:pass") is None
+    assert parse_turn_value("host:3478:notanumber:pass") is None
+    assert parse_turn_value("host:3478:1758650868") is None
+
+
 def test_notexists_constant():
     assert NOTEXISTS == "NOTEXISTS"
 

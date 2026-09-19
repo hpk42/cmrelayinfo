@@ -1,4 +1,11 @@
 
+## [0.2.1] - 2026-09-19
+
+### Fixes
+
+- parse the TURN metadata the way core does.
+
+
 ## [0.2.0] - 2026-08-26
 
 ### Features / Changes
